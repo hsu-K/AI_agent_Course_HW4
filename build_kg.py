@@ -30,6 +30,54 @@ AUTH = (
 
 def extract_entities(article_number: str, reg_name: str, content: str) -> dict[str, Any]:
     """TODO(student, required): implement LLM extraction and return {"rules": [...]}"""
+    pipeline = get_raw_pipeline()
+    tokenizer = get_tokenizer()
+
+    if not pipeline or not tokenizer:
+        print("[Error] LLM pipeline or tokenizer not available.")
+        return {"rules": []}
+
+    prompt = f"""You are a legal article analysis assistant. Analyze the following article and extract the rules within it.
+
+Regulation: {reg_name}
+Article Number: {article_number}
+Article Content:
+{content}
+
+Please extract rules in JSON format, returning a list of rules. Each rule should contain:
+- type: rule type ("prohibition", "obligation", "penalty", "requirement")
+- action: specific action or condition
+- result: consequence or outcome
+
+Return format:
+[
+  {{"type": "...", "action": "...", "result": "..."}},
+  ...
+]
+
+Return only JSON, no other text."""
+
+    # 聊天模板
+    messages = [{"role": "user", "content": prompt}]
+    chat_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    
+        # Call LLM
+    output = pipeline(chat_text, max_new_tokens=512)
+    response_text = output[0]["generated_text"].strip()
+
+    # Parse JSON
+    import json
+    try:
+        # Try to extract JSON part
+        start_idx = response_text.find('[')
+        end_idx = response_text.rfind(']') + 1
+        if start_idx != -1 and end_idx > start_idx:
+            json_str = response_text[start_idx:end_idx]
+            rules = json.loads(json_str)
+            return {"rules": rules if isinstance(rules, list) else []}
+    except (json.JSONDecodeError, ValueError):
+        pass
+
     return {
         "rules": []
     }
@@ -112,7 +160,48 @@ def build_graph() -> None:
         # - skip invalid rules with empty action/result
         # - generate unique rule_id and deduplicate logically similar rules
         # - create Rule nodes with required properties and link via CONTAINS_RULE
+        for reg_id, article_number, content in articles:
+            print(f"Processing Article {article_number} of Regulation ID {reg_id}...")
+            reg_name, reg_category = reg_map.get(reg_id, ("Unknown", "Unknown"))
+            
+            # 利用LLM提取規則
+            entities = extract_entities(article_number, reg_name, content)
+            rules = entities.get("rules", []) + build_fallback_rules(article_number, content)
 
+            for rule in rules:
+                # 過濾無效規則
+                if not rule.get("action") or not rule.get("result"):
+                    continue
+            
+                # 生成唯一 ID
+                rule_id = f"rule_{rule_counter}"
+                rule_counter += 1
+                
+                # 建立 Rule 節點
+                session.run(
+                    """
+                    MATCH (a:Article {number: $num})
+                    CREATE (r:Rule {
+                        rule_id: $rid,
+                        type: $type,
+                        action: $action,
+                        result: $result,
+                        art_ref: $art_ref,
+                        reg_name: $reg_name
+                    })
+                    MERGE (a)-[:CONTAINS_RULE]->(r)
+                    """,
+                    num=article_number,
+                    rid=rule_id,
+                    type=rule.get("type", "unknown"),
+                    action=rule.get("action", ""),
+                    result=rule.get("result", ""),
+                    art_ref=article_number,
+                    reg_name=reg_name
+                )
+
+
+        print("[+] Graph build completed. Total rules extracted:", rule_counter)
         # 4) Create full-text index on Rule fields.
         session.run(
             """
