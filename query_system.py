@@ -17,7 +17,6 @@ from dotenv import load_dotenv
 
 from llm_loader import load_local_llm, get_tokenizer, get_raw_pipeline
 
-
 # ========== 0) Initialization ==========
 load_dotenv()
 
@@ -67,34 +66,201 @@ def generate_text(messages: list[dict[str, str]], max_new_tokens: int = 220) -> 
 
 def extract_entities(question: str) -> dict[str, Any]:
 	"""TODO(student, required): parse question to {question_type, subject_terms, aspect}."""
+	"""Parse question to extract entities for retrieval."""
+	# Use LLM to understand the question
+	messages = [
+		{
+			"role": "user",
+			"content": f"""Analyze this question and extract:
+1. question_type: "penalty", "requirement", "procedure", "fee", or "general"
+2. subject_terms: key nouns/subjects (e.g., ["student ID", "late"])
+3. aspect: "penalty", "condition", "process", or "general"
+
+Question: {question}
+
+Return JSON format only:
+{{"question_type": "...", "subject_terms": [...], "aspect": "..."}}"""
+		}
+	]
+	
+	try:
+		response = generate_text(messages, max_new_tokens=100)
+		import json
+		import re
+		json_match = re.search(r'\{.*\}', response, re.DOTALL)
+		if json_match:
+			result = json.loads(json_match.group())
+			return result
+	except Exception as e:
+		print(f"[Warning] Entity extraction failed: {e}")
+	
+	# Fallback: simple keyword extraction
 	return {
 		"question_type": "general",
-		"subject_terms": [],
+		"subject_terms": question.lower().split(),
 		"aspect": "general",
 	}
 
 
 def build_typed_cypher(entities: dict[str, Any]) -> tuple[str, str]:
 	"""TODO(student, required): return (typed_query, broad_query) with score and required fields."""
-	cypher_typed = """
+	"""Build typed (precise) and broad (fuzzy) Cypher queries."""
+	subject_terms = entities.get("subject_terms", [])
+	question_type = entities.get("question_type", "general")
+	aspect = entities.get("aspect", "general")
+	
+	# Build typed query: precise match on terms and rule type
+	where_conditions = []
+	
+	# Match rule type if available
+	if question_type in ["penalty", "requirement", "obligation", "prohibition"]:
+		where_conditions.append(f'r.type = "{question_type}"')
+	
+	# Match subject terms in action or result
+	if subject_terms:
+		term_conditions = []
+		for term in subject_terms[:3]:  # Limit to 3 terms to avoid over-constraint
+			if len(term) > 2:  # Skip very short terms
+				term_conditions.append(f'(r.action CONTAINS "{term}" OR r.result CONTAINS "{term}")')
+		if term_conditions:
+			where_conditions.append(" OR ".join(term_conditions))
+	
+	cypher_typed = f"""
+	MATCH (a:Article)-[:CONTAINS_RULE]->(r:Rule)
+	WHERE {" AND ".join(where_conditions) if where_conditions else "r.rule_id IS NOT NULL"}
+	RETURN r.rule_id AS rule_id, r.type AS type, r.action AS action, 
+		   r.result AS result, r.art_ref AS art_ref, r.reg_name AS reg_name
+	LIMIT 10
+	""" if where_conditions else ""
+	
+	# Build broad query: fulltext search
+	search_terms = " OR ".join(subject_terms[:5]) if subject_terms else "regulation"
+	cypher_broad = f"""
+	CALL db.index.fulltext.queryNodes("rule_idx", "{search_terms}")
+	YIELD node AS r, score
+	RETURN r.rule_id AS rule_id, r.type AS type, r.action AS action,
+		   r.result AS result, r.art_ref AS art_ref, r.reg_name AS reg_name,
+		   score
+	ORDER BY score DESC
+	LIMIT 10
 	"""
-
-	cypher_broad = """
-	"""
-
+	
 	return cypher_typed, cypher_broad
 
 
 def get_relevant_articles(question: str) -> list[dict[str, Any]]:
-	"""TODO(student, required): run typed+broad retrieval and return merged rule dicts."""
+	"""
+	Retrieve relevant rules from Neo4j using typed+broad strategy.
+	
+	Flow:
+	1. Extract entities from question
+	2. Build typed (precise) and broad (fuzzy) queries
+	3. Execute typed query first
+	4. If insufficient results, execute broad query
+	5. Merge and deduplicate results
+	"""
+
 	if driver is None:
+		print("[Error] Neo4j driver not available")
 		return []
-	return []
+	
+	# Step 1: Extract entities
+	entities = extract_entities(question)
+	print(f"[Debug] Extracted entities: {entities}")
+	
+	# Step 2: Build queries
+	cypher_typed, cypher_broad = build_typed_cypher(entities)
+	
+	# Step 3: Execute typed query
+	results_dict = {}  # Use dict to deduplicate by rule_id
+	
+	with driver.session() as session:
+		# Try typed query first (if not empty)
+		if cypher_typed.strip():
+			try:
+				print("[Query] Executing typed query...")
+				typed_results = session.run(cypher_typed)
+				for record in typed_results:
+					rule = {
+						"rule_id": record.get("rule_id"),
+						"type": record.get("type"),
+						"action": record.get("action"),
+						"result": record.get("result"),
+						"art_ref": record.get("art_ref"),
+						"reg_name": record.get("reg_name"),
+					}
+					if rule["rule_id"]:
+						results_dict[rule["rule_id"]] = rule
+				print(f"[Result] Found {len(results_dict)} rules from typed query")
+			except Exception as e:
+				print(f"[Warning] Typed query failed: {e}")
+		
+		# If insufficient results, execute broad query
+		if len(results_dict) < 3:
+			try:
+				print("[Query] Executing broad query...")
+				broad_results = session.run(cypher_broad)
+				for record in broad_results:
+					rule = {
+						"rule_id": record.get("rule_id"),
+						"type": record.get("type"),
+						"action": record.get("action"),
+						"result": record.get("result"),
+						"art_ref": record.get("art_ref"),
+						"reg_name": record.get("reg_name"),
+					}
+					if rule["rule_id"] and rule["rule_id"] not in results_dict:
+						results_dict[rule["rule_id"]] = rule
+				print(f"[Result] Found {len(results_dict)} total rules after broad query")
+			except Exception as e:
+				print(f"[Warning] Broad query failed: {e}")
+	
+	return list(results_dict.values())
 
 
 def generate_answer(question: str, rule_results: list[dict[str, Any]]) -> str:
 	"""TODO(student, required): generate grounded answer from retrieved rules only."""
-	return "Insufficient rule evidence to answer this question."
+	"""Generate grounded answer from retrieved rules using LLM."""
+	# return "Insufficient rule evidence to answer this question."
+	# Check if we have relevant rules
+	if not rule_results:
+		return "Insufficient rule evidence to answer this question."
+	
+	# Format rules for the LLM
+	rules_text = ""
+	for i, rule in enumerate(rule_results, 1):
+		rules_text += f"\nRule {i}:\n"
+		rules_text += f"  Type: {rule.get('type', 'unknown')}\n"
+		rules_text += f"  Action: {rule.get('action', '')}\n"
+		rules_text += f"  Result: {rule.get('result', '')}\n"
+		rules_text += f"  Article: {rule.get('art_ref', '')}\n"
+		rules_text += f"  Regulation: {rule.get('reg_name', '')}\n"
+	
+	# Create prompt for LLM to generate answer
+	messages = [
+		{
+			"role": "user",
+			"content": f"""Based on the following regulations, answer the question concisely and cite the relevant article/regulation.
+
+Question: {question}
+
+Relevant Rules:
+{rules_text}
+
+Answer (be concise, cite sources):"""
+		}
+	]
+	
+	try:
+		answer = generate_text(messages, max_new_tokens=150)
+		return answer.strip()
+	except Exception as e:
+		print(f"[Error] Answer generation failed: {e}")
+		# Fallback: construct simple answer from first rule
+		if rule_results:
+			first_rule = rule_results[0]
+			return f"Based on {first_rule.get('reg_name', 'the regulations')}, Article {first_rule.get('art_ref', '')}: {first_rule.get('result', 'See regulations for details.')}"
+		return "Unable to generate answer."
 
 
 def main() -> None:

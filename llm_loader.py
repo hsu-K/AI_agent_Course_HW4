@@ -72,6 +72,7 @@ def load_local_llm(model_id: str = MODEL_ID) -> Any:
         do_sample=False,          # deterministic (equivalent to temperature=0)
         repetition_penalty=1.1,
         return_full_text=False,   # only return the newly generated tokens
+        # tokenizer_kwargs={"max_length": None}
     )
 
     _llm_instance = _raw_pipeline
