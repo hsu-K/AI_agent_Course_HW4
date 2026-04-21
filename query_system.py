@@ -129,7 +129,8 @@ def build_typed_cypher(entities: dict[str, Any]) -> tuple[str, str]:
 	MATCH (a:Article)-[:CONTAINS_RULE]->(r:Rule)
 	WHERE {" AND ".join(where_conditions) if where_conditions else "r.rule_id IS NOT NULL"}
 	RETURN r.rule_id AS rule_id, r.type AS type, r.action AS action, 
-		   r.result AS result, r.art_ref AS art_ref, r.reg_name AS reg_name
+		   r.result AS result, r.art_ref AS art_ref, r.reg_name AS reg_name,
+		   a.content AS article_content, a.number AS article_number
 	LIMIT 10
 	""" if where_conditions else ""
 	
@@ -138,8 +139,10 @@ def build_typed_cypher(entities: dict[str, Any]) -> tuple[str, str]:
 	cypher_broad = f"""
 	CALL db.index.fulltext.queryNodes("rule_idx", "{search_terms}")
 	YIELD node AS r, score
+	MATCH (a:Article)-[:CONTAINS_RULE]->(r)
 	RETURN r.rule_id AS rule_id, r.type AS type, r.action AS action,
 		   r.result AS result, r.art_ref AS art_ref, r.reg_name AS reg_name,
+		   a.content AS article_content, a.number AS article_number,
 		   score
 	ORDER BY score DESC
 	LIMIT 10
@@ -187,8 +190,8 @@ def get_relevant_articles(question: str) -> list[dict[str, Any]]:
 						"action": record.get("action"),
 						"result": record.get("result"),
 						"art_ref": record.get("art_ref"),
-						"reg_name": record.get("reg_name"),
-					}
+						"reg_name": record.get("reg_name"),					"article_content": record.get("article_content"),
+					"article_number": record.get("article_number"),					}
 					if rule["rule_id"]:
 						results_dict[rule["rule_id"]] = rule
 				print(f"[Result] Found {len(results_dict)} rules from typed query")
@@ -207,8 +210,8 @@ def get_relevant_articles(question: str) -> list[dict[str, Any]]:
 						"action": record.get("action"),
 						"result": record.get("result"),
 						"art_ref": record.get("art_ref"),
-						"reg_name": record.get("reg_name"),
-					}
+						"reg_name": record.get("reg_name"),					"article_content": record.get("article_content"),
+					"article_number": record.get("article_number"),					}
 					if rule["rule_id"] and rule["rule_id"] not in results_dict:
 						results_dict[rule["rule_id"]] = rule
 				print(f"[Result] Found {len(results_dict)} total rules after broad query")
@@ -226,7 +229,7 @@ def generate_answer(question: str, rule_results: list[dict[str, Any]]) -> str:
 	if not rule_results:
 		return "Insufficient rule evidence to answer this question."
 	
-	# Format rules for the LLM
+	# Format rules for the LLM (include full Article content)
 	rules_text = ""
 	for i, rule in enumerate(rule_results, 1):
 		rules_text += f"\nRule {i}:\n"
@@ -235,6 +238,9 @@ def generate_answer(question: str, rule_results: list[dict[str, Any]]) -> str:
 		rules_text += f"  Result: {rule.get('result', '')}\n"
 		rules_text += f"  Article: {rule.get('art_ref', '')}\n"
 		rules_text += f"  Regulation: {rule.get('reg_name', '')}\n"
+		# ✅ Add full Article content so LLM can read the complete text
+		if rule.get('article_content'):
+			rules_text += f"  Full Article Text:\n    {rule.get('article_content')}\n"
 	
 	# Create prompt for LLM to generate answer
 	messages = [
@@ -303,4 +309,3 @@ def main() -> None:
 
 if __name__ == "__main__":
 	main()
-
