@@ -45,7 +45,7 @@ Article Content:
 {content}
 
 Please extract rules in JSON format, returning a list of rules. Each rule should contain:
-- type: rule type ("prohibition", "obligation", "penalty", "requirement")
+- type: rule type ("Prohibition", "Obligation", "Requirement", "Permissions", "Incentive Rules")
 - action: specific action or condition
 - result: consequence or outcome
 
@@ -55,15 +55,25 @@ Return format:
   ...
 ]
 
+#Here are some examples of how to extract rules:
+Example: "Students may apply for a suspension of studies for one semester to two academic years each time they apply. In principle, the maximum period a student may suspend their studies is two academic years.Students whose suspension of studies has come to an end must apply for a resumption of studies or face expulsion from the University."
+Extracted Rules:
+[
+    {{"type": "Permission", "action": "apply for suspension of studies", "result": "allowed for one semester to two academic years"}},
+    {{"type": "Prohibition", "action": "suspend studies for more than two academic years", "result": "face expulsion from the University"}},
+    {{"type": "Obligation", "action": "suspension of studies has come to an end", "result": "must apply for a resumption of studies"}}
+]
+
 Return only JSON, no other text."""
 
     # 聊天模板
     messages = [{"role": "user", "content": prompt}]
     chat_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     
-        # Call LLM
-    output = pipeline(chat_text, max_new_tokens=512)
+    # Call LLM
+    output = pipeline(chat_text)
     response_text = output[0]["generated_text"].strip()
+    print(response_text)
 
     # Parse JSON
     import json
@@ -90,7 +100,7 @@ def build_fallback_rules(article_number: str, content: str) -> list[dict[str, st
     fallback = []
     content_lower = content.lower()
     
-    # 1. Prohibition rules - what is NOT allowed
+    # Prohibition rules - what is NOT allowed
     if re.search(r'prohibit|forbidden|cannot|must not|not allowed|ban', content_lower):
         prohibitions = re.findall(r'(?:prohibit|forbid|ban|cannot)\s+([^.,;]+)', content_lower)
         for action in prohibitions[:2]:  # Maximum 2 rules
@@ -102,7 +112,7 @@ def build_fallback_rules(article_number: str, content: str) -> list[dict[str, st
                     "result": "prohibited action"
                 })
     
-    # 2. Obligation rules - what MUST be done
+    # Obligation rules - what MUST be done
     if re.search(r'must|require|should|shall|need to|required to', content_lower):
         obligations = re.findall(r'(?:must|require|should|shall)\s+([^.,;]+)', content_lower)
         for action in obligations[:2]:
@@ -114,17 +124,7 @@ def build_fallback_rules(article_number: str, content: str) -> list[dict[str, st
                     "result": "required action"
                 })
     
-    # 3. Penalty rules - consequences for violation
-    if re.search(r'penalty|deduction|fine|zero score|fail|disciplinary|consequence', content_lower):
-        penalty_match = re.search(r'(?:penalty|deduction|fine|consequence)[^.,;]*', content_lower)
-        if penalty_match:
-            fallback.append({
-                "type": "penalty",
-                "action": "violate regulation",
-                "result": penalty_match.group(0).strip()
-            })
-    
-    # 4. Requirement rules - conditions that must be met
+    # Requirement rules - conditions that must be met
     if re.search(r'require|bring|provide|submit|present|need', content_lower):
         fallback.append({
             "type": "requirement",
@@ -132,13 +132,6 @@ def build_fallback_rules(article_number: str, content: str) -> list[dict[str, st
             "result": "required condition"
         })
     
-    # 5. Procedure rules - step-by-step processes
-    if re.search(r'procedure|process|step|follow|first|then|afterward', content_lower):
-        fallback.append({
-            "type": "procedure",
-            "action": "follow procedure",
-            "result": "follow steps as outlined"
-        })
     
     return fallback
 
@@ -207,91 +200,69 @@ def build_graph() -> None:
             """
         )
 
+
         rule_counter = 0
 
         # Collect all articles for batch processing
-        batch_articles = []
         for reg_id, article_number, content in articles:
             reg_name, reg_category = reg_map.get(reg_id, ("Unknown", "Unknown"))
-            batch_articles.append({
-                "reg_id": reg_id,
-                "article_number": article_number,
-                "content": content,
-                "reg_name": reg_name,
-                "reg_category": reg_category
-            })
-
-        # Process articles in batches to maximize GPU efficiency
-        BATCH_SIZE = 5
-        total_articles = len(batch_articles)
-        
-        for batch_start in range(0, total_articles, BATCH_SIZE):
-            batch_end = min(batch_start + BATCH_SIZE, total_articles)
-            batch = batch_articles[batch_start:batch_end]
             
-            print(f"[Batch] Processing articles {batch_start + 1}-{batch_end} of {total_articles}...")
+            print(f"  -> Article {article_number}...", end=" ")
             
-            for article in batch:
-                article_number = article["article_number"]
-                reg_name = article["reg_name"]
-                content = article["content"]
-                
-                print(f"  -> Article {article_number}...", end=" ")
-                
-                # Extract rules using LLM
-                entities = extract_entities(article_number, reg_name, content)
-                rules = entities.get("rules", [])
-                
-                # Use fallback rules if LLM returns nothing
-                if not rules:
-                    rules = build_fallback_rules(article_number, content)
-                
-                rules += build_fallback_rules(article_number, content)
+            # Extract rules using LLM
+            entities = extract_entities(article_number, reg_name, content)
+            rules = entities.get("rules", [])
+            
+            # Use fallback rules if LLM returns nothing
+            if not rules:
+                rules = build_fallback_rules(article_number, content)
+            
+            rules += build_fallback_rules(article_number, content)
 
 
-                # 移除重複的rule
-                seen = set()
-                unique_rules = []
-                for rule in rules:
-                    key = (rule.get("action"), rule.get("result"))
-                    if key not in seen and rule.get("action") and rule.get("result"):
-                        seen.add(key)
-                        unique_rules.append(rule)
+            # 移除重複的rule
+            seen = set()
+            unique_rules = []
+            for rule in rules:
+                key = (rule.get("action"), rule.get("result"))
+                if key not in seen and rule.get("action") and rule.get("result"):
+                    seen.add(key)
+                    unique_rules.append(rule)
 
-                rules_created = 0
+            rules_created = 0
+            
+            # Create Rule nodes
+            for rule in unique_rules:
                 
-                # Create Rule nodes
-                for rule in unique_rules:
-                    
-                    # Generate unique rule ID
-                    rule_id = f"rule_{rule_counter}"
-                    rule_counter += 1
-                    rules_created += 1
-                    
-                    # Create Rule node and link
-                    session.run(
-                        """
-                        MATCH (a:Article {number: $num})
-                        CREATE (r:Rule {
-                            rule_id: $rid,
-                            type: $type,
-                            action: $action,
-                            result: $result,
-                            art_ref: $art_ref,
-                            reg_name: $reg_name
-                        })
-                        MERGE (a)-[:CONTAINS_RULE]->(r)
-                        """,
-                        num=article_number,
-                        rid=rule_id,
-                        type=rule.get("type", "unknown"),
-                        action=rule.get("action", ""),
-                        result=rule.get("result", ""),
-                        art_ref=article_number,
-                        reg_name=reg_name
-                    )
+                # Generate unique rule ID
+                rule_id = f"rule_{rule_counter}"
+                rule_counter += 1
+                rules_created += 1
                 
-                print(f"{rules_created} rules created")
+                # Create Rule node and link
+                session.run(
+                    """
+                    MATCH (a:Article {number: $num})
+                    CREATE (r:Rule {
+                        rule_id: $rid,
+                        type: $type,
+                        action: $action,
+                        result: $result,
+                        art_ref: $art_ref,
+                        reg_name: $reg_name
+                    })
+                    MERGE (a)-[:CONTAINS_RULE]->(r)
+                    """,
+                    num=article_number,
+                    rid=rule_id,
+                    type=rule.get("type", "unknown"),
+                    action=rule.get("action", ""),
+                    result=rule.get("result", ""),
+                    art_ref=article_number,
+                    reg_name=reg_name
+                )
+            
+            print(f"{rules_created} rules created")
 
 
         print("[+] Graph build completed. Total rules extracted:", rule_counter)
