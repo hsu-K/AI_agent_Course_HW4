@@ -77,7 +77,7 @@ Question: {question}
 Extract:
 1. rule_types: relevant rule types from ["Prohibition", "Obligation", "Requirement", "Permissions", "Incentive Rules"] 
    (e.g., if question asks about penalties -> "Prohibition"; if asks about what's required -> "Obligation")
-2. subject_terms: 2-5 key nouns/subjects (e.g., ["student", "withdrawal", "penalty"])
+2. subject_terms: 2-5 key nouns/subjects (e.g., ["easycard", "duration", "penalty", "fee"])
 3. keywords: important keywords to search in action/result fields
 
 Return JSON format only:
@@ -85,7 +85,7 @@ Return JSON format only:
 
 Example:
 - Q: "What is the penalty for late submission?"
-- A: {{"rule_types": ["Prohibition"], "subject_terms": ["submission", "penalty", "late"], "keywords": ["late", "penalty", "submission"]}}
+- A: {{"rule_types": ["Prohibition"], "subject_terms": ["submission", "penalty"], "keywords": ["penalty", "late submission"]}}
 """
 		}
 	]
@@ -310,7 +310,7 @@ Relevant Rules:
 
 Provide a concise answer in the following format:
 1. Directly answer the question
-2. Cite relevant regulation names and article numbers
+2. Cite relevant regulation names and article content (e.g., "According to Article 5 of Regulation X, ...")
 3. Mention the relevant rule type (Prohibition/Obligation/Requirement/Permission, etc.)
 
 Answer (Concise and clear, must cite sources):"""

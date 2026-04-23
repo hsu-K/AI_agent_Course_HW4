@@ -1,74 +1,123 @@
-# 🛠️ Prerequisites
-Before you begin, ensure you have the following installed:
+# Assignment 4
 
-* Python 3.11 (Strict requirement) 
+## KG construction logic and design choices
 
-* Docker Desktop (Required to run the Neo4j database)
 
-* Internet access for first-time HuggingFace model download (local model will be cached)
-# ⚙️ Environment Setup
-### 1. Database Setup (Neo4j via Docker)
+### 1. 資料來源
 
-You must run a local Neo4j instance using Docker. Run the following command in your terminal:
+圖譜的原始資料來自 SQLite 資料庫 `ncu_regulations.db`，其中包含：
 
-` docker run -d --name neo4j -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password neo4j:latest `
+- `regulations(reg_id, name, category)`：法規基本資訊
+- `articles(reg_id, article_number, content)`：法條內容
 
-Explanation of flags:
+### 2. 圖譜 schema
 
-* -d: Runs the container in detached mode (background).
+專案固定使用以下圖譜結構：
 
-*  -p 7474:7474: Exposes the web interface port (Browser).
-
-*  -p 7687:7687: Exposes the Bolt protocol port (Python connection).
-
-*  -e NEO4J_AUTH=...: Sets the username (neo4j) and password (password).
-
-Verification: After running the command, check if the database is ready:
-
-1. Open your browser and go to http://localhost:7474.
-
-2. Login with user: neo4j and password: password.
-
-### 2. Virtual Environment Setup
-
-It is highly recommended to use a virtual environment to manage dependencies.
-
-**For macOS / Linux:**
-```
-# Create virtual environment
-python -m venv venv
-
-# Activate environment
-source venv/bin/activate
-```
-**For Windows:**
-```
-# Create virtual environment
-python -m venv venv
-
-# Activate environment
-venv\Scripts\activate
+```mermaid
+graph LR
+		R[Regulation]
+		A[Article]
+		Rule[Rule]
+		R -- HAS_ARTICLE --> A
+		A -- CONTAINS_RULE --> Rule
 ```
 
-### 3. Install Dependencies
+實際節點與關係如下：
 
-`pip install -r requirements.txt`
+- `Regulation`
+	- `id`, `name`, `category`
+- `Article`
+	- `number`, `content`, `reg_name`, `category`
+- `Rule`
+	- `rule_id`, `type`, `action`, `result`, `art_ref`, `reg_name`
 
-# 📂 File Descriptions
+關係：
 
-* **source/:** Folder containing raw English PDF regulations
-* **setup_data.py:** Parses PDFs using pdfplumber and Regex, cleans the text, and stores structured data into a local SQLite database
-* **build_kg.py:** Reads from SQLite and executes Cypher queries to create nodes (Regulation, Article) and relationships (HAS_ARTICLE) in Neo4j.
-* **query_system.py:** The interactive chatbot. It retrieves full regulation context and uses the LLM to generate answers.
-* **auto_test.py:** Runs benchmark questions in test_data.json and uses an "LLM-as-a-Judge" to score your system (Pass/Fail).
+- `(Regulation)-[:HAS_ARTICLE]->(Article)`
+- `(Article)-[:CONTAINS_RULE]->(Rule)`
 
-# 🚀 Execution Order
-**make sure you have already run neo4j in docker**
-**run commands in this repository root folder**
-1. `python setup_data.py`
-2. `python build_kg.py`
-3. (Not necessary)`python query_system.py`: Test your system manually to see if it answers correctly.
-4. `python auto_test.py`: run the benchmark test  
+### 3. Rule 抽取策略
+
+`build_kg.py` 會對每條 Article 做兩段式抽取：
+
+1. **LLM 抽取**：讓模型從條文中整理出規則，並輸出結構化 JSON。
+2. **Fallback 規則抽取**：如果 LLM 抽取不足，則用簡單且可重現的關鍵字規則補足。
+
+### 4. Rule 設計
+
+- **Rule type 正規化**：將抽取結果統一為 `Prohibition`、`Obligation`、`Requirement`、`Permissions`、`Incentive Rules`，方便檢索系統匹配類型。
+- **去重**：用 `(action, result)` 去除重複和無用的規則。
+- **全文索引**：對 Article content 與 Rule action/result 建全文索引，提升查詢覆蓋率。
+
+---
+
+## KG Schema / Diagram
+
+![full_Graph](./images/full_graph.png)
+![one_chain](./images/one_chain.png)
+
+---
+
+## Key Cypher Query Design and Retrieval Strategy
+
+### 1. 問題解析：先把自然語句轉成檢索屬性
+
+- `question_type`：問題類型，例如費用、條件、流程、權限等
+- `rule_types`：對應的規則型別，例如 `Prohibition`、`Requirement`
+- `subject_terms`：主題詞，例如學生證、學分、考試
+- `keywords`：用來做全文檢索的關鍵字
 
 
+### 2. 兩層檢索主體
+
+目前查詢採用兩層主體策略：
+
+#### A. Typed Query
+
+先用較精準的條件找規則：
+
+- 規則型別 `r.type`
+- `r.action` / `r.result` 中是否包含關鍵詞
+
+這層的目的是優先找到語意最接近的規則。
+
+#### B. Broad Query
+
+如果 typed query 結果不足，再用全文索引 `rule_idx` 搜尋：
+
+- 將 `keywords + subject_terms` 合併
+- 對 `Rule.action` 與 `Rule.result` 做 fulltext search
+
+
+### 3. 回答不足時的補救
+
+若 Rule 層結果仍不夠，系統會進一步利用 `article_content_idx` 搜尋 Article 原文，作為最後 fallback。
+
+先找到最接近原始條文的上下文，再讓 LLM 根據證據作答。
+
+### 4. 結果排序與合併
+
+檢索後會：
+
+- 依 `rule_id` 去重
+- 依相關度排序
+- 保留 `art_ref`、`reg_name`、`article_content` 供答案生成引用
+
+---
+
+## 專案檔案說明
+
+- `setup_data.py`：將 PDF 規章整理成 SQLite。
+- `build_kg.py`：把 SQLite 資料建成 Neo4j 圖譜。
+- `query_system.py`：問題解析、圖譜檢索、答案生成。
+- `auto_test.py`：自動測試系統表現。
+- `result.txt`：最佳測試結果 12/8 (60% 通過率)
+
+---
+
+## Failure analysis + improvements made
+
+本次測試中發現，即使是相同的生成策略與檢索系統，LLM每次測試的結果也都有所不同，有2到3題的浮動。
+我發現修改LLM對問題的類型與關鍵字提取能改善情況，因為很多時候是LLM提取到不是那麼相關的關鍵字，導致抓到的Node較雜且無效，影響答案的推斷。
 
